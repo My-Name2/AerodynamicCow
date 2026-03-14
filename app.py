@@ -504,14 +504,10 @@ def build_3d_figure(X, Y, speed_field, Cp_field, polys, V_inf, field_3d="Speed |
         x=X, y=Y, z=Z,
         colorscale=cs, cmin=zlim[0], cmax=zlim[1],
         showscale=True,
-        colorbar=dict(title=dict(text=zlab, font=dict(color='white')),
-                      tickfont=dict(color='#aaa'), thickness=12, len=.65),
+        colorbar=dict(title=zlab, tickfont=dict(color='#aaa'),
+                      thickness=12, len=.65),
         lighting=dict(ambient=.45, diffuse=.85, roughness=.4,
                       specular=.4, fresnel=.3),
-        contours=dict(
-            x=dict(show=True, color='rgba(255,255,255,0.06)', width=1),
-            y=dict(show=True, color='rgba(255,255,255,0.06)', width=1),
-            z=dict(show=False)),
         opacity=.96, name='field')
 
     # Project body onto floor (z = 0) and lift wall at z=0 plane
@@ -539,21 +535,21 @@ def build_3d_figure(X, Y, speed_field, Cp_field, polys, V_inf, field_3d="Speed |
         title=dict(text=f'3D {zlab} Surface  ·  drag to rotate  ·  scroll to zoom',
                    font=dict(color='white', size=13), x=.5, xanchor='center'),
         scene=dict(
-            bgcolor='#0b0f18',
-            xaxis=dict(title='x / L', gridcolor='#202535', zerolinecolor='#202535',
-                       titlefont=dict(color='#778899'),tickfont=dict(color='#778899'),
-                       showbackground=True, backgroundcolor='#0b0f18'),
-            yaxis=dict(title='y / L', gridcolor='#202535', zerolinecolor='#202535',
-                       titlefont=dict(color='#778899'),tickfont=dict(color='#778899'),
-                       showbackground=True, backgroundcolor='#0b0f18'),
-            zaxis=dict(title=zlab, range=zlim,
+            xaxis=dict(title=dict(text='x / L', font=dict(color='#778899')),
                        gridcolor='#202535', zerolinecolor='#202535',
-                       titlefont=dict(color='#778899'),tickfont=dict(color='#778899'),
-                       showbackground=True, backgroundcolor='#0b0f18'),
+                       tickfont=dict(color='#778899'),
+                       showbackground=True, backgroundcolor='#0d1420'),
+            yaxis=dict(title=dict(text='y / L', font=dict(color='#778899')),
+                       gridcolor='#202535', zerolinecolor='#202535',
+                       tickfont=dict(color='#778899'),
+                       showbackground=True, backgroundcolor='#0d1420'),
+            zaxis=dict(title=dict(text=zlab, font=dict(color='#778899')),
+                       range=zlim, gridcolor='#202535', zerolinecolor='#202535',
+                       tickfont=dict(color='#778899'),
+                       showbackground=True, backgroundcolor='#0d1420'),
             camera=dict(eye=dict(x=-1.35, y=-1.75, z=1.45),
                         up=dict(x=0, y=0, z=1)),
-            aspectmode='manual',
-            aspectratio=dict(x=1.5, y=1.5, z=.7)),
+            aspectmode='cube'),
         font=dict(color='white'))
     return fig3
 
