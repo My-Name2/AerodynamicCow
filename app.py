@@ -267,13 +267,12 @@ def integrate_forces(polys, q, x1, y1, L, β, V_inf, alpha_rad, ref_L):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def trace_particles(u_grid, v_grid, x1d, y1d, mask_grid,
-                    n_particles=110, n_frames=72, dt=0.008, trail=28):
+                    n_particles=110, n_frames=100, dt=0.008, trail=55):
     """
     RK4 particle tracing in normalised-velocity field.
-    Velocities are divided by V_inf so animation speed is view-independent.
-    Returns history (list of position arrays) and speeds list.
+    Particles that enter solid bodies are immediately reinjected at the inlet.
+    Returns history (list of position arrays), speeds list, and trail length.
     """
-    # Use normalised (unit-free) velocities so animation pace is consistent
     un = np.where(mask_grid, 0., u_grid)
     vn = np.where(mask_grid, 0., v_grid)
     V_ref = np.nanmax(np.hypot(un, vn)) + 1e-9
@@ -283,10 +282,18 @@ def trace_particles(u_grid, v_grid, x1d, y1d, mask_grid,
                                  bounds_error=False, fill_value=0.)
     fv = RegularGridInterpolator((y1d, x1d), vn, method='linear',
                                  bounds_error=False, fill_value=0.)
+    # Mask interpolator: value > 0.4 → inside a solid body
+    fmask = RegularGridInterpolator(
+        (y1d, x1d), mask_grid.astype(float),
+        method='linear', bounds_error=False, fill_value=0.)
 
     def vel(pts):
         yx = np.clip(pts, [x1d[0],y1d[0]], [x1d[-1],y1d[-1]])[:,::-1]
         return fu(yx), fv(yx)
+
+    def inside_body(pts):
+        yx = np.clip(pts, [x1d[0],y1d[0]], [x1d[-1],y1d[-1]])[:,::-1]
+        return fmask(yx) > 0.4
 
     def rk4(pts, dt):
         k1u,k1v = vel(pts);            d1 = np.c_[k1u,k1v]
@@ -295,12 +302,10 @@ def trace_particles(u_grid, v_grid, x1d, y1d, mask_grid,
         k4u,k4v = vel(pts+dt*d3);     d4 = np.c_[k4u,k4v]
         return pts + dt/6*(d1+2*d2+2*d3+d4)
 
-    # Injection grid: full height, slight left offset
     y_inj = np.linspace(0.02, 0.98, n_particles)
     x_inj = np.full(n_particles, 0.01)
     pts   = np.column_stack([x_inj, y_inj])
 
-    # Seed raw (un-normalised) speed interpolator for colour
     fspd = RegularGridInterpolator(
         (y1d, x1d), np.where(mask_grid, 0., np.hypot(u_grid, v_grid)),
         method='linear', bounds_error=False, fill_value=0.)
@@ -314,16 +319,17 @@ def trace_particles(u_grid, v_grid, x1d, y1d, mask_grid,
     rng     = np.random.default_rng(0)
 
     for _ in range(n_frames - 1):
-        pts   = rk4(pts, dt)
-        u_c,v_c = vel(pts); spd_n = np.hypot(u_c,v_c)
-        exited = ((pts[:,0]>1.01)|(pts[:,0]<-.01)|
-                  (pts[:,1]>1.01)|(pts[:,1]<-.01))
+        new_pts = rk4(pts, dt)
+        u_c, v_c = vel(new_pts); spd_n = np.hypot(u_c, v_c)
+        exited  = ((new_pts[:,0] > 1.01) | (new_pts[:,0] < -.01) |
+                   (new_pts[:,1] > 1.01) | (new_pts[:,1] < -.01))
         stalled = spd_n < 5e-4
-        ri = exited | stalled
+        masked  = inside_body(new_pts)          # hit solid body → reinject
+        ri = exited | stalled | masked
         if ri.any():
-            pts[ri,0] = x_inj[ri]
-            pts[ri,1] = y_inj[ri] + rng.uniform(-.01,.01, ri.sum())
-        pts = np.clip(pts, 0., 1.)
+            new_pts[ri, 0] = x_inj[ri]
+            new_pts[ri, 1] = y_inj[ri] + rng.uniform(-.01, .01, ri.sum())
+        pts = np.clip(new_pts, 0., 1.)
         history.append(pts.copy())
         speeds.append(raw_spd(pts))
 
@@ -370,81 +376,98 @@ def build_vapor_figure(history, speeds, trail_len,
                        speed_field, Cp_field, X, Y, polys,
                        V_inf, alpha_deg,
                        bg_field="Speed |V|", trail_style="Vapor (white)"):
-    x1d = X[0,:]; y1d = Y[:,0]
-    n_frames  = len(history)
-    n_part    = history[0].shape[0]
+    """3-D animated vapor tunnel: particles distributed across tunnel depth."""
+    n_frames = len(history)
+    n_part   = history[0].shape[0]
 
-    # ── Background heatmap ────────────────────────────────────────────────
+    Z_SPREAD = 0.70                                          # tunnel depth span
+    y_depth  = np.linspace(-Z_SPREAD/2, Z_SPREAD/2, n_part) # per-particle depth
+
+    # ── Back-wall surface showing flow field ──────────────────────────────
     if bg_field == "Speed |V|":
-        z_bg = np.where(np.isnan(speed_field), 0, speed_field)
-        cs, cmin, cmax = 'jet', 0, float(V_inf*2.2)
-        cbar_txt = "Speed  (m/s)"
+        surf_c = np.where(np.isnan(speed_field), 0, speed_field / (V_inf + 1e-9))
+        cs, zmin_bg, zmax_bg, cbar_txt = 'jet', 0, 2.5, "V / V∞"
     elif bg_field == "Pressure Cp":
-        z_bg = np.clip(np.where(np.isnan(Cp_field), 0, Cp_field), -3.5, 1.)
-        cs, cmin, cmax = 'RdBu_r', -3.5, 1.
-        cbar_txt = "Cp"
-    else:  # dark/off
-        z_bg = np.zeros_like(speed_field)
-        cs, cmin, cmax = 'greys', 0, 1
-        cbar_txt = ""
+        surf_c = np.clip(np.where(np.isnan(Cp_field), 0, -Cp_field), 0, 4)
+        cs, zmin_bg, zmax_bg, cbar_txt = 'RdBu', 0, 4, "−Cp"
+    else:
+        surf_c = np.zeros_like(speed_field)
+        cs, zmin_bg, zmax_bg, cbar_txt = 'greys', 0, 1, ""
 
-    bg = go.Heatmap(x=x1d, y=y1d, z=z_bg, colorscale=cs,
-                    zmin=cmin, zmax=cmax, showscale=(bg_field != "Off (dark)"),
-                    colorbar=dict(
-                        title=dict(text=cbar_txt, font=dict(color='#bbb')),
-                        tickfont=dict(color='#999'), thickness=11, len=.75,
-                        x=1.01),
-                    hoverinfo='skip', name='field')
+    back_wall = go.Surface(
+        x=X, y=np.full_like(X, -Z_SPREAD/2 - 0.04), z=Y,
+        surfacecolor=surf_c, colorscale=cs, cmin=zmin_bg, cmax=zmax_bg,
+        showscale=(bg_field != "Off (dark)"),
+        colorbar=dict(title=cbar_txt, thickness=10, len=0.6,
+                      tickfont=dict(color='#aaa')),
+        lighting=dict(ambient=1.0, diffuse=0., roughness=0., specular=0.),
+        opacity=0.88, showlegend=False, hoverinfo='skip', name='field')
 
-    bodies      = _body_traces(polys)
-    n_static    = 1 + len(bodies)      # heatmap + body polygons
-    trail_idx   = n_static             # index of animated trail trace
+    # ── Extruded body: rings at multiple depth slices + spanwise ribs ─────
+    bodies_3d = []
+    ring_depths = np.linspace(-Z_SPREAD/2, Z_SPREAD/2, 9)
+    for poly in polys:
+        xb = np.append(poly[:,0], poly[0,0])
+        zb = np.append(poly[:,1], poly[0,1])   # flow-y → Plotly-z (height)
+        for yp in ring_depths:
+            bodies_3d.append(go.Scatter3d(
+                x=xb, y=np.full(len(xb), float(yp)), z=zb,
+                mode='lines',
+                line=dict(color='rgba(200,220,255,0.50)', width=2),
+                showlegend=False, hoverinfo='skip'))
+        # Spanwise ribs connecting front/back faces
+        n_ribs = 14
+        step = max(1, len(poly) // n_ribs)
+        for i in range(0, len(poly), step):
+            bodies_3d.append(go.Scatter3d(
+                x=[poly[i,0], poly[i,0]],
+                y=[-Z_SPREAD/2, Z_SPREAD/2],
+                z=[poly[i,1], poly[i,1]],
+                mode='lines',
+                line=dict(color='rgba(200,220,255,0.30)', width=1),
+                showlegend=False, hoverinfo='skip'))
 
-    # ── Trail builder ─────────────────────────────────────────────────────
+    n_static  = 1 + len(bodies_3d)
+    trail_idx = n_static
+
+    # ── 3-D trail builder (x=flow-x, y=depth, z=flow-y/height) ──────────
     def make_trail(k):
         t0   = max(0, k - trail_len + 1)
-        ages = list(range(t0, k+1))
-        xs, ys = [], []
+        ages = list(range(t0, k + 1))
+        xs, ys, zs, cs_arr = [], [], [], []
+
+        for p in range(n_part):
+            yp     = float(y_depth[p])
+            prev_x = prev_z = None
+            for t in ages:
+                cx = float(history[t][p, 0])
+                cz = float(history[t][p, 1])
+                # Insert gap when particle teleports back to inlet
+                if prev_x is not None and abs(cx - prev_x) + abs(cz - prev_z) > 0.15:
+                    xs.append(None); ys.append(None)
+                    zs.append(None); cs_arr.append(None)
+                xs.append(cx); ys.append(yp); zs.append(cz)
+                cs_arr.append(float(speeds[t][p]))
+                prev_x, prev_z = cx, cz
+            xs.append(None); ys.append(None); zs.append(None); cs_arr.append(None)
 
         if trail_style == "Vapor (white)":
-            for p in range(n_part):
-                for t in ages:
-                    xs.append(float(history[t][p,0]))
-                    ys.append(float(history[t][p,1]))
-                xs.append(None); ys.append(None)
-            return go.Scatter(
-                x=xs, y=ys, mode='lines',
-                line=dict(color='rgba(195,225,255,0.50)', width=1.1),
+            return go.Scatter3d(x=xs, y=ys, z=zs, mode='lines',
+                line=dict(color='rgba(195,225,255,0.55)', width=2),
                 showlegend=False, hoverinfo='skip', name='trail')
-
         elif trail_style == "Neon":
-            for p in range(n_part):
-                for t in ages:
-                    xs.append(float(history[t][p,0]))
-                    ys.append(float(history[t][p,1]))
-                xs.append(None); ys.append(None)
-            return go.Scatter(
-                x=xs, y=ys, mode='lines',
-                line=dict(color='rgba(60,255,180,0.55)', width=1.0),
+            return go.Scatter3d(x=xs, y=ys, z=zs, mode='lines',
+                line=dict(color='rgba(60,255,180,0.60)', width=2),
                 showlegend=False, hoverinfo='skip', name='trail')
-
         else:  # Speed-colored dots
-            cs_arr = []
-            for p in range(n_part):
-                for t in ages:
-                    xs.append(float(history[t][p,0]))
-                    ys.append(float(history[t][p,1]))
-                    cs_arr.append(float(speeds[t][p]))
-                xs.append(None); ys.append(None); cs_arr.append(None)
-            return go.Scatter(
-                x=xs, y=ys, mode='markers',
+            return go.Scatter3d(x=xs, y=ys, z=zs, mode='markers',
                 marker=dict(color=cs_arr, colorscale='hot',
-                            cmin=0, cmax=float(V_inf*2), size=2,
+                            cmin=0, cmax=float(V_inf * 2), size=2,
                             showscale=False),
                 showlegend=False, hoverinfo='skip', name='trail')
 
     init_trail = make_trail(0)
-    all_data   = [bg] + bodies + [init_trail]
+    all_data   = [back_wall] + bodies_3d + [init_trail]
 
     frames = [
         go.Frame(data=[make_trail(k)], traces=[trail_idx], name=str(k))
@@ -452,8 +475,30 @@ def build_vapor_figure(history, speeds, trail_len,
     ]
 
     fig = go.Figure(data=all_data, frames=frames)
-    _dark_axes_2d(fig,
-        f"Live Vapor Tunnel  ·  {n_part} streams  ·  V∞={V_inf:.0f} m/s  ·  α={alpha_deg}°")
+    fig.update_layout(
+        paper_bgcolor='#0b0f18', height=640,
+        margin=dict(l=0, r=0, t=50, b=72),
+        title=dict(
+            text=(f"Live 3D Vapor Tunnel  ·  {n_part} streams  ·  "
+                  f"V∞={V_inf:.0f} m/s  ·  α={alpha_deg}°"),
+            font=dict(color='white', size=13), x=.5, xanchor='center'),
+        scene=dict(
+            xaxis=dict(title=dict(text='x / L', font=dict(color='#778899')),
+                       gridcolor='#1e2535', zerolinecolor='#1e2535',
+                       tickfont=dict(color='#778899'),
+                       showbackground=True, backgroundcolor='#0b0f18'),
+            yaxis=dict(title=dict(text='depth', font=dict(color='#778899')),
+                       gridcolor='#1e2535', zerolinecolor='#1e2535',
+                       tickfont=dict(color='#778899'),
+                       showbackground=True, backgroundcolor='#0b0f18'),
+            zaxis=dict(title=dict(text='y / L', font=dict(color='#778899')),
+                       gridcolor='#1e2535', zerolinecolor='#1e2535',
+                       tickfont=dict(color='#778899'),
+                       showbackground=True, backgroundcolor='#0b0f18'),
+            camera=dict(eye=dict(x=-1.5, y=-2.0, z=1.0),
+                        up=dict(x=0, y=0, z=1)),
+            aspectmode='auto'),
+        font=dict(color='white'))
 
     # ── Animation controls ────────────────────────────────────────────────
     btn_style = dict(bgcolor='#1c2235', bordercolor='#3d8bff',
@@ -461,15 +506,15 @@ def build_vapor_figure(history, speeds, trail_len,
     fig.update_layout(
         updatemenus=[dict(
             type='buttons', showactive=False, **btn_style,
-            y=-.10, x=.5, xanchor='center', yanchor='top',
+            y=-.08, x=.5, xanchor='center', yanchor='top',
             pad=dict(t=0),
             buttons=[
                 dict(label='▶  Play', method='animate',
-                     args=[None, dict(frame=dict(duration=55, redraw=False),
+                     args=[None, dict(frame=dict(duration=60, redraw=True),
                                      fromcurrent=True, loop=True,
                                      transition=dict(duration=0))]),
                 dict(label='⏸  Pause', method='animate',
-                     args=[[None], dict(frame=dict(duration=0, redraw=False),
+                     args=[[None], dict(frame=dict(duration=0, redraw=True),
                                         mode='immediate',
                                         transition=dict(duration=0))])
             ])],
@@ -481,7 +526,7 @@ def build_vapor_figure(history, speeds, trail_len,
             pad=dict(b=4, t=52), len=1., x=0., y=0.,
             steps=[dict(method='animate',
                         args=[[str(k)], dict(mode='immediate',
-                              frame=dict(duration=55, redraw=True),
+                              frame=dict(duration=60, redraw=True),
                               transition=dict(duration=0))],
                         label='') for k in range(n_frames)])])
     return fig
@@ -647,8 +692,8 @@ with st.sidebar:
 
     st.subheader("Smoke Tunnel")
     n_particles  = st.slider("Particle streams", 50, 180, 110, 10)
-    n_frames     = st.slider("Animation frames", 40, 100, 72, 4)
-    trail_len    = st.slider("Trail length", 8, 40, 28, 2)
+    n_frames     = st.slider("Animation frames", 60, 160, 100, 10)
+    trail_len    = st.slider("Trail length", 10, 100, 55, 5)
     trail_style  = st.selectbox("Trail style",
                                 ["Vapor (white)", "Neon", "Speed-colored dots"])
     bg_field_ani = st.selectbox("Background (animation)",
