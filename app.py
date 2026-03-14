@@ -267,9 +267,11 @@ def integrate_forces(polys, q, x1, y1, L, β, V_inf, alpha_rad, ref_L):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def trace_particles(u_grid, v_grid, x1d, y1d, mask_grid,
-                    n_particles=110, n_frames=100, dt=0.008, trail=55):
+                    n_particles=110, n_frames=220, dt=0.008, trail=55):
     """
     RK4 particle tracing in normalised-velocity field.
+    A warm-up phase runs before recording so particles are already spread
+    across the full domain at frame 0 — the resulting loop is seamless.
     Particles that enter solid bodies are immediately reinjected at the inlet.
     Returns history (list of position arrays), speeds list, and trail length.
     """
@@ -302,6 +304,20 @@ def trace_particles(u_grid, v_grid, x1d, y1d, mask_grid,
         k4u,k4v = vel(pts+dt*d3);     d4 = np.c_[k4u,k4v]
         return pts + dt/6*(d1+2*d2+2*d3+d4)
 
+    def advance(pts, rng):
+        """One RK4 step with reinsertion; returns updated pts."""
+        new_pts = rk4(pts, dt)
+        u_c, v_c = vel(new_pts); spd_n = np.hypot(u_c, v_c)
+        exited  = ((new_pts[:,0] > 1.01) | (new_pts[:,0] < -.01) |
+                   (new_pts[:,1] > 1.01) | (new_pts[:,1] < -.01))
+        stalled = spd_n < 5e-4
+        masked  = inside_body(new_pts)
+        ri = exited | stalled | masked
+        if ri.any():
+            new_pts[ri, 0] = x_inj[ri]
+            new_pts[ri, 1] = y_inj[ri] + rng.uniform(-.01, .01, ri.sum())
+        return np.clip(new_pts, 0., 1.)
+
     y_inj = np.linspace(0.02, 0.98, n_particles)
     x_inj = np.full(n_particles, 0.01)
     pts   = np.column_stack([x_inj, y_inj])
@@ -314,22 +330,21 @@ def trace_particles(u_grid, v_grid, x1d, y1d, mask_grid,
         yx = np.clip(p, [x1d[0],y1d[0]], [x1d[-1],y1d[-1]])[:,::-1]
         return fspd(yx)
 
+    rng = np.random.default_rng(0)
+
+    # ── Warm-up: advance until particles are spread across the full domain ──
+    # At freestream speed, a particle crosses the domain in ~1/dt steps.
+    # Run 1.5× that so every stream is fully populated before we record.
+    warm_up = max(150, int(1.5 / dt))
+    for _ in range(warm_up):
+        pts = advance(pts, rng)
+
+    # ── Record frames ──────────────────────────────────────────────────────
     history = [pts.copy()]
     speeds  = [raw_spd(pts)]
-    rng     = np.random.default_rng(0)
 
     for _ in range(n_frames - 1):
-        new_pts = rk4(pts, dt)
-        u_c, v_c = vel(new_pts); spd_n = np.hypot(u_c, v_c)
-        exited  = ((new_pts[:,0] > 1.01) | (new_pts[:,0] < -.01) |
-                   (new_pts[:,1] > 1.01) | (new_pts[:,1] < -.01))
-        stalled = spd_n < 5e-4
-        masked  = inside_body(new_pts)          # hit solid body → reinject
-        ri = exited | stalled | masked
-        if ri.any():
-            new_pts[ri, 0] = x_inj[ri]
-            new_pts[ri, 1] = y_inj[ri] + rng.uniform(-.01, .01, ri.sum())
-        pts = np.clip(new_pts, 0., 1.)
+        pts = advance(pts, rng)
         history.append(pts.copy())
         speeds.append(raw_spd(pts))
 
@@ -692,7 +707,7 @@ with st.sidebar:
 
     st.subheader("Smoke Tunnel")
     n_particles  = st.slider("Particle streams", 50, 180, 110, 10)
-    n_frames     = st.slider("Animation frames", 60, 160, 100, 10)
+    n_frames     = st.slider("Loop length (frames)", 120, 400, 220, 20)
     trail_len    = st.slider("Trail length", 10, 100, 55, 5)
     trail_style  = st.selectbox("Trail style",
                                 ["Vapor (white)", "Neon", "Speed-colored dots"])
